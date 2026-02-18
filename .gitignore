@@ -1,0 +1,15 @@
+# Archivos de configuración (¡MUY IMPORTANTE!)
+config.json
+*.txt
+*.env
+
+# Carpetas de datos y descargas
+downloads/
+libros_locales/
+logs/
+
+# Archivos de sistema y Python
+__pycache__/
+*.pyc
+.vscode/
+.idea/
