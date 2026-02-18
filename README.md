@@ -25,7 +25,7 @@ Un bot de Telegram avanzado y versátil diseñado como una navaja suiza de utili
 
 ## 📂 Estructura del Proyecto
 
-
+```text
 .
 ├── bot_main.py           # Núcleo del bot y registro de comandos
 ├── user_manager.py       # Gestión de usuarios, logs y permisos
@@ -41,7 +41,7 @@ Un bot de Telegram avanzado y versátil diseñado como una navaja suiza de utili
 │   ├── pdf_editor.py     # Generación y mezcla de capas sobre PDF
 │   └── updater.py        # Crawler para Biblioteca Secreta
 └── downloads/            # Almacenamiento temporal [Ignorado en Git]
-
+```
 🛠️ Requisitos del Sistema
 Python 3.10+
 
