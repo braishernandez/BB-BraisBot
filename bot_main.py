@@ -63,14 +63,38 @@ async def start(update: Update, context):
     user_name = update.effective_user.username or update.effective_user.first_name
     user_manager.log(user_name, "Inició el bot")
     
+    texto_bienvenida = (
+        f"👋 Hola <b>@{user_name}</b>, ¡bienvenido a tu <b>BB-BraisBot</b>!\n\n"
+        "Esta es tu navaja suiza de utilidades personales:\n\n"
+        
+        "📹 <b>Media & Redes Sociales</b>\n"
+        "• YouTube (MP3/MP4) y enlaces de TikTok, IG, X.\n\n"
+        
+        "📚 <b>Gestión de Libros</b>\n"
+        "• Búsqueda en LibGen y biblioteca local.\n\n"
+        
+        "🖼️ <b>Imágenes & Stickers</b>\n"
+        "• Quita fondos y ajusta fotos a 512px.\n\n"
+        
+        "📄 <b>Utilidades PDF</b>\n"
+        "• Rellenado inteligente de formularios PDF.\n\n"
+        "✨ <i>Selecciona una opción o envía un archivo directamente:</i>"
+    )
+
+    # Teclado organizado en 2 columnas para que sea estético
     keyboard = [
-        [InlineKeyboardButton("📚 Buscar Libros", callback_data="menu_books")],
-        [InlineKeyboardButton("🎵 Música / 🎥 Video", callback_data="menu_media")]
+        [
+            InlineKeyboardButton("📚 Libros", callback_data="menu_books"),
+            InlineKeyboardButton("🎬 Media", callback_data="menu_media")
+        ],
+        [
+            InlineKeyboardButton("🖼️ Imágenes", callback_data="menu_images"),
+            InlineKeyboardButton("📄 PDFs", callback_data="menu_pdf")
+        ]
     ]
+
     await update.message.reply_text(
-        f"👋 Hola <b>@{user_name}</b>\n\n¿Qué deseas hacer hoy?\n\n"
-        "📖 <b>Libros:</b> Usa <code>/book titulo</code>\n"
-        "🖼 <b>Imágenes/PDF:</b> Arrastra fotos o archivos PDF.",
+        texto_bienvenida,
         reply_markup=InlineKeyboardMarkup(keyboard), 
         parse_mode='HTML'
     )
