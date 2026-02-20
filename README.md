@@ -22,6 +22,8 @@ Un bot de Telegram avanzado y versátil diseñado como una navaja suiza de utili
 ### 📄 Utilidades PDF
 - **Rellenado Inteligente:** Escaneo de campos rellenables en archivos PDF mediante detección de patrones (puntos/guiones).
 - **Inyección de Texto:** Superposición de respuestas sobre el PDF original manteniendo el formato.
+- **Merge tool:** Une multiples documentos PDF en uno solo.
+- **Convertidor:** Transforma PDF a Word (.docx) manteniendo la estructura
 
 ## 📂 Estructura del Proyecto
 

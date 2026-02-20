@@ -5,11 +5,12 @@ import io
 import re
 import asyncio
 import logging
+import time
 
 from datetime import datetime
 from pathlib import Path
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, filters
+from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes
 from user_manager import user_manager
 from modules.libros import search_books, book_callback_handler
 from modules.media import handle_youtube_search, media_callback_handler, download_media
@@ -34,186 +35,19 @@ def clean_downloads():
 def is_authorized(update: Update):
     user = update.effective_user
     if not user: return False
-
     whitelist = user_manager.config.get('whitelist', [])
     user_id = str(user.id)
     username = user.username.lower() if user.username else None
-    
-    # Debug en consola para el administrador
-    print(f"DEBUG AUTH: Intentando acceder -> ID: {user_id} | Username: @{username}")
-
     if user_id in whitelist: return True
     if username:
         whitelist_lower = [str(item).lower() for item in whitelist]
         if username in whitelist_lower: return True
-            
     return False
 
-def get_user_identifier(update: Update):
-    user = update.effective_user
-    return user.username if user.username else f"ID_{user.id}"
+def user_id_alt(update):
+    return update.effective_user.id
 
-# --- COMANDOS PRINCIPALES ---
-async def start(update: Update, context):
-    if not is_authorized(update):
-        user = update.effective_user
-        user_manager.log("SISTEMA", f"ACCESO DENEGADO START: {user.full_name} ({user.id})")
-        return await update.message.reply_text("⛔ No estás autorizado.")
-    
-    user_name = update.effective_user.username or update.effective_user.first_name
-    user_manager.log(user_name, "Inició el bot")
-    
-    texto_bienvenida = (
-        f"👋 Hola <b>@{user_name}</b>, ¡bienvenido a tu <b>BB-BraisBot</b>!\n\n"
-        "Esta es tu navaja suiza de utilidades personales:\n\n"
-        
-        "📹 <b>Media & Redes Sociales</b>\n"
-        "• YouTube (MP3/MP4) y enlaces de TikTok, IG, X.\n\n"
-        
-        "📚 <b>Gestión de Libros</b>\n"
-        "• Búsqueda en LibGen y biblioteca local.\n\n"
-        
-        "🖼️ <b>Imágenes & Stickers</b>\n"
-        "• Quita fondos y ajusta fotos a 512px.\n\n"
-        
-        "📄 <b>Utilidades PDF</b>\n"
-        "• Rellenado inteligente de formularios PDF.\n\n"
-        "✨ <i>Selecciona una opción o envía un archivo directamente:</i>"
-    )
-
-    # Teclado organizado en 2 columnas para que sea estético
-    keyboard = [
-        [
-            InlineKeyboardButton("📚 Libros", callback_data="menu_books"),
-            InlineKeyboardButton("🎬 Media", callback_data="menu_media")
-        ],
-        [
-            InlineKeyboardButton("🖼️ Imágenes", callback_data="menu_images"),
-            InlineKeyboardButton("📄 PDFs", callback_data="menu_pdf")
-        ]
-    ]
-
-    await update.message.reply_text(
-        texto_bienvenida,
-        reply_markup=InlineKeyboardMarkup(keyboard), 
-        parse_mode='HTML'
-    )
-async def error_handler(update: object, context) -> None:
-    """Log de errores causados por actualizaciones."""
-    # Evitamos logs gigantescos de errores de red temporales
-    if "Server disconnected" in str(context.error) or "RemoteProtocolError" in str(context.error):
-        print(f"⚠️ Reintentando conexión... (Error de red temporal)")
-        return
-
-    user_manager.log("ERROR", f"Causa: {context.error}")
-    print(f"❌ Error crítico: {context.error}")
-    
-    # Si el error es manejable, avisamos al usuario
-    if isinstance(update, Update) and update.effective_message:
-        await update.effective_message.reply_text("🤔 Hubo un pequeño problema técnico. Inténtalo de nuevo en un momento.")
-# --- LÓGICA DE PDF ---
-async def handle_pdf_upload(update: Update, context):
-    if not update.message or not is_authorized(update): return
-
-    doc = update.message.document
-    if not doc or not doc.file_name.lower().endswith('.pdf'): return
-
-    msg = await update.message.reply_text("🔍 Analizando estructura del PDF...")
-    try:
-        pdf_file = await doc.get_file()
-        path = f"downloads/temp_{update.effective_user.id}.pdf"
-        await pdf_file.download_to_drive(path)
-        
-        fields = find_fillable_fields(path)
-        if not fields:
-            return await msg.edit_text("❌ No detecté campos de relleno en este PDF.")
-
-        context.user_data.update({
-            'pdf_path': path, 'pdf_fields': fields, 'pdf_answers': [],
-            'pdf_step': 0, 'pdf_offset_x': 0, 'pdf_offset_y': 5
-        })
-
-        label = fields[0].get('label', 'Campo 1')
-        await msg.edit_text(f"✅ Detectados {len(fields)} campos.\n\n📝 <b>{label}:</b>", parse_mode='HTML')
-    except Exception as e:
-        await update.message.reply_text(f"❌ Error interno: {e}")
-
-# --- HANDLER DE TEXTO GLOBAL ---
-async def global_text_handler(update: Update, context):
-    # 1. IDENTIFICACIÓN ULTRA-SEGURA
-    user = update.effective_user
-    if not user: return
-
-    # Si no tiene username, usamos su ID. Evitamos el error de 'NoneType'
-    user_id = str(user.id)
-    user_alias = f"@{user.username}" if user.username else f"ID:{user_id}"
-    
-    text = update.message.text if update.message.text else ""
-    chat = update.effective_chat
-    chat_title = chat.title[:30] if chat.title else "Privado"
-    chat_label = "PRIVADO" if chat.type == "private" else f"GRUPO: {chat_title}"
-
-    # 2. LOG ANTES DE CUALQUIER FILTRO (Para ver por qué falla)
-    # Esto registrará TODO, incluso de usuarios no autorizados
-    user_manager.log(user_alias, "INTENTO_TEXTO", text, origen=chat_label)
-
-    # 3. CONTROL DE ACCESO
-    if not is_authorized(update):
-        if chat.type == "private":
-            await update.message.reply_text("⛔ No estás autorizado.")
-        return
-
-    # --- A partir de aquí, el código para usuarios autorizados ---
-
-    # 4. DETECTOR DE LINKS (IGNORAR SI NO HAY COMANDO)
-    social_networks = ["youtube.com", "youtu.be", "tiktok.com", "instagram.com", "x.com"]
-    if any(net in text.lower() for net in social_networks) and not text.startswith('/'):
-        return 
-
-    # 5. LÓGICA DE PDF
-    user_data = context.user_data
-    if 'pdf_step' in user_data:
-        # (Tu lógica de PDF se mantiene igual...)
-        user_data['pdf_answers'].append(text)
-        fields = user_data['pdf_fields']
-        next_step = len(user_data['pdf_answers'])
-        if next_step < len(fields):
-            user_data['pdf_step'] = next_step
-            label = fields[next_step].get('label', f'Campo {next_step + 1}')
-            await update.message.reply_text(f"📝 <b>{label}:</b>", parse_mode='HTML')
-        else:
-            keyboard = [[InlineKeyboardButton("🚀 Generar PDF ya", callback_data="pdf_final")]]
-            await update.message.reply_text("✅ Datos listos.", reply_markup=InlineKeyboardMarkup(keyboard))
-        return
-
-    # 6. MÚSICA
-    if text.startswith('/'): return
-    bot_obj = await context.bot.get_me()
-    if chat.type == "private" or f"@{bot_obj.username}" in text:
-        query = text.replace(f"@{bot_obj.username}", "").strip()
-        if query:
-            await handle_youtube_search(update, context)
-# --- CALLBACKS PDF, IMÁGENES Y MENÚ ---
-async def pdf_callback_handler(update: Update, context):
-    query = update.callback_query
-    await query.answer()
-    if query.data == "pdf_menu_ajuste":
-        keyboard = [[InlineKeyboardButton("⬅️", callback_data="pdf_L"), InlineKeyboardButton("⬆️", callback_data="pdf_U"), 
-                     InlineKeyboardButton("⬇️", callback_data="pdf_D"), InlineKeyboardButton("➡️", callback_data="pdf_R")],
-                    [InlineKeyboardButton("✅ Listo, generar PDF", callback_data="pdf_final")]]
-        await query.message.edit_text(f"📍 Ajuste: X={context.user_data['pdf_offset_x']} Y={context.user_data['pdf_offset_y']}", 
-                                      reply_markup=InlineKeyboardMarkup(keyboard))
-    elif query.data == "pdf_final":
-        await finalizar_pdf(query, context)
-    else:
-        move = 2
-        if query.data == "pdf_U": context.user_data['pdf_offset_y'] += move
-        if query.data == "pdf_D": context.user_data['pdf_offset_y'] -= move
-        if query.data == "pdf_L": context.user_data['pdf_offset_x'] -= move
-        if query.data == "pdf_R": context.user_data['pdf_offset_x'] += move
-        await query.message.edit_text(f"📍 Ajuste: X={context.user_data['pdf_offset_x']} Y={context.user_data['pdf_offset_y']}", 
-                                      reply_markup=query.message.reply_markup)
-
+# --- FUNCIONES DE APOYO PDF ---
 async def finalizar_pdf(query, context):
     await context.bot.send_chat_action(chat_id=query.message.chat_id, action="upload_document")
     with open(context.user_data['pdf_path'], "rb") as f:
@@ -222,91 +56,268 @@ async def finalizar_pdf(query, context):
                                context.user_data['pdf_offset_x'], context.user_data['pdf_offset_y'])
     await context.bot.send_document(chat_id=query.message.chat_id, document=final, filename="Relleno.pdf")
     context.user_data.clear()
+async def convert_pdf_to_word(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    # Intentamos sacar la ruta del context que guardamos en handle_pdf_upload
+    pdf_path = context.user_data.get('pdf_path')
 
+    if not pdf_path or not os.path.exists(pdf_path):
+        await query.answer("❌ Error: Archivo no encontrado", show_alert=True)
+        return await query.edit_message_text("❌ No encontré el archivo. Por favor, vuelve a subir el PDF.")
+
+    await query.edit_message_text("⚙️ <b>Convirtiendo a Word...</b>\nEsto puede tardar unos segundos dependiendo del tamaño.", parse_mode='HTML')
+    
+    docx_path = pdf_path.replace(".pdf", ".docx")
+    
+    try:
+        from pdf2docx import Converter
+        # Procesar conversión
+        cv = Converter(pdf_path)
+        cv.convert(docx_path)
+        cv.close()
+        
+        # Enviar el archivo
+        await query.message.reply_document(
+            document=open(docx_path, 'rb'),
+            filename=os.path.basename(docx_path),
+            caption="✅ Convertido correctamente."
+        )
+        await query.message.delete() # Borra el mensaje de "Convirtiendo..."
+        
+    except Exception as e:
+        print(f"ERROR CONVERSIÓN: {e}")
+        await query.message.reply_text(f"❌ Error técnico: {e}")
+    finally:
+        # Limpieza de archivos temporales
+        if os.path.exists(docx_path): os.remove(docx_path)
+        if os.path.exists(pdf_path): os.remove(pdf_path)
+        context.user_data.pop('pdf_path', None)
+        
+        
+# --- COMANDOS Y CALLBACKS ---
+async def start(update: Update, context):
+    if not is_authorized(update):
+        return await update.message.reply_text("⛔ No estás autorizado.")
+    user_name = update.effective_user.username or update.effective_user.first_name
+    texto_bienvenida = (
+        f"👋 Hola <b>@{user_name}</b>\n\n"
+        "📹 <b>Media:</b> Descarga YouTube, TikTok, IG, X.\n"
+        "📚 <b>Libros:</b> LibGen y biblioteca local.\n"
+        "🖼️ <b>Imágenes:</b> Quita fondos y Stickers.\n"
+        "📄 <b>PDFs:</b> Une, rellena o convierte a Word."
+    )
+    keyboard = [
+        [InlineKeyboardButton("📚 Libros", callback_data="menu_books"), InlineKeyboardButton("🎬 Media", callback_data="menu_media")],
+        [InlineKeyboardButton("🖼️ Imágenes", callback_data="menu_images"), InlineKeyboardButton("📄 PDFs", callback_data="menu_pdf")]
+    ]
+    await update.message.reply_text(texto_bienvenida, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='HTML')
+
+async def menu_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    context.user_data['pdf_to_merge'] = []
+    keyboard = [
+        [InlineKeyboardButton("➕ Empezar a unir PDFs", callback_data="start_merging")],
+        [InlineKeyboardButton("🔄 Convertir a Word", callback_data="start_conversion")]
+    ]
+    await query.edit_message_text("📂 <b>Herramientas PDF</b>\n\nElige una opción:", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='HTML')
+
+async def start_merging(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    context.user_data['merging_active'] = True
+    context.user_data['pdf_to_merge'] = []
+    await query.edit_message_text("📥 <b>Modo Unión Activo</b>\nEnvíame los PDFs. Al terminar pulsa el botón.", 
+                                  reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("✅ ¡Unir ahora!", callback_data="do_merge")]]), parse_mode='HTML')
+
+async def unir_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_authorized(update): return
+    context.user_data['merging_active'] = True
+    context.user_data['pdf_to_merge'] = []
+    await update.message.reply_text("📥 Modo Unión Activo. Envíame los PDFs.")
+
+async def do_merge(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    is_callback = update.callback_query is not None
+    if is_callback: await update.callback_query.answer()
+    files = context.user_data.get('pdf_to_merge', [])
+    if len(files) < 2:
+        return await update.effective_message.reply_text("❌ Necesito al menos 2 PDFs.")
+    from modules.pdf_editor import merge_pdfs 
+    output = f"downloads/union_{update.effective_user.id}.pdf"
+    try:
+        merge_pdfs(files, output)
+        await update.effective_chat.send_document(document=open(output, 'rb'), filename="PDF_Unido.pdf")
+        context.user_data['merging_active'] = False
+        for f in files: os.remove(f)
+    except Exception as e: await update.effective_message.reply_text(f"❌ Error: {e}")
+
+async def handle_pdf_upload(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_authorized(update): return
+    doc = update.message.document
+    
+    # 1. Guardamos el archivo inmediatamente para tenerlo disponible
+    pdf_path = f"downloads/temp_{update.effective_user.id}_{doc.file_name}"
+    file = await doc.get_file()
+    await file.download_to_drive(pdf_path)
+    
+    # 2. Guardamos la ruta en el contexto del usuario
+    context.user_data['pdf_path'] = pdf_path
+
+    # CASO ESPECIAL: Si ya estamos en "Modo Unión", seguimos añadiendo a la lista
+    if context.user_data.get('merging_active'):
+        context.user_data.setdefault('pdf_to_merge', []).append(pdf_path)
+        count = len(context.user_data['pdf_to_merge'])
+        return await update.message.reply_text(
+            f"✅ Archivo {count} añadido a la lista de unión.",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("✅ ¡Unir ahora!", callback_data="do_merge")]])
+        )
+    
+    # CASO NORMAL: Preguntamos qué quiere hacer el usuario
+    keyboard = [
+        [
+            InlineKeyboardButton("📝 Rellenar Campos", callback_data="option_fill"),
+            InlineKeyboardButton("🔄 Convertir a Word", callback_data="pdf_to_word")
+        ],
+        [InlineKeyboardButton("❌ Cancelar", callback_data="menu_pdf")]
+    ]
+    
+    await update.message.reply_text(
+        f"📄 <b>Archivo recibido:</b> <code>{doc.file_name}</code>\n\n"
+        "¿Qué deseas hacer con este documento?",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode='HTML'
+    )
+async def prepare_fill_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    pdf_path = context.user_data.get('pdf_path')
+    if not pdf_path or not os.path.exists(pdf_path):
+        return await query.edit_message_text("❌ Error: No se encuentra el archivo. Reenvíalo.")
+
+    await query.edit_message_text("🔍 Analizando estructura del formulario...")
+    
+    # Llamamos a tu lógica de siempre para buscar campos
+    fields = find_fillable_fields(pdf_path)
+    
+    if not fields:
+        return await query.edit_message_text("❌ Este PDF no parece tener campos editables.")
+
+    context.user_data.update({
+        'pdf_fields': fields, 
+        'pdf_answers': [], 
+        'pdf_step': 0, 
+        'pdf_offset_x': 0, 
+        'pdf_offset_y': 5
+    })
+    
+    label = fields[0].get('label', 'Campo 1')
+    await query.message.reply_text(f"✅ Detectados {len(fields)} campos.\n\n📝 <b>{label}:</b>", parse_mode='HTML')
+    
+    
 async def handle_photo(update: Update, context):
     if not is_authorized(update): return
-    msg = await update.message.reply_text("⏳ Procesando imagen...")
-    try:
-        photo_file = await update.message.photo[-1].get_file()
-        image_bytes = bytes(await photo_file.download_as_bytearray()) 
-        no_bg_bytes = remove_background(image_bytes)
-        context.user_data['last_img'] = no_bg_bytes
-        keyboard = [[InlineKeyboardButton("🖼 PNG", callback_data="img_png"), InlineKeyboardButton("✨ Sticker", callback_data="img_sticker")]]
-        await msg.edit_text("✅ Fondo eliminado:", reply_markup=InlineKeyboardMarkup(keyboard))
-    except Exception as e: await msg.edit_text(f"❌ Error: {e}")
+    msg = await update.message.reply_text("⏳ Procesando...")
+    photo_file = await update.message.photo[-1].get_file()
+    image_bytes = bytes(await photo_file.download_as_bytearray()) 
+    no_bg_bytes = remove_background(image_bytes)
+    context.user_data['last_img'] = no_bg_bytes
+    keyboard = [[InlineKeyboardButton("🖼 PNG", callback_data="img_png"), InlineKeyboardButton("✨ Sticker", callback_data="img_sticker")]]
+    await msg.edit_text("✅ Listo:", reply_markup=InlineKeyboardMarkup(keyboard))
+
+async def global_text_handler(update: Update, context):
+    if not is_authorized(update) or not update.message.text: return
+    text = update.message.text
+    if 'pdf_step' in context.user_data:
+        context.user_data['pdf_answers'].append(text)
+        steps = len(context.user_data['pdf_answers'])
+        fields = context.user_data['pdf_fields']
+        if steps < len(fields):
+            await update.message.reply_text(f"📝 <b>{fields[steps].get('label', f'Campo {steps+1}')}:</b>", parse_mode='HTML')
+        else:
+            await update.message.reply_text("✅ Datos listos.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🚀 Generar", callback_data="pdf_final")]]))
+        return
+    if not text.startswith('/'): await handle_youtube_search(update, context)
+
+async def pdf_callback_handler(update: Update, context):
+    query = update.callback_query
+    await query.answer()
+    if query.data == "pdf_final": await finalizar_pdf(query, context)
 
 async def image_callback_handler(update: Update, context):
     query = update.callback_query
     await query.answer()
-    img_bytes = context.user_data.get('last_img')
-    if not img_bytes: return
+    img = context.user_data.get('last_img')
+    if not img: return
     if query.data == "img_png":
-        bio = io.BytesIO(img_bytes)
-        bio.name = "sin_fondo.png"
-        await context.bot.send_document(query.message.chat_id, document=bio)
+        await context.bot.send_document(query.message.chat_id, document=io.BytesIO(img), filename="bg_removed.png")
     elif query.data == "img_sticker":
-        sticker_bio = prepare_sticker(img_bytes)
-        await context.bot.send_sticker(query.message.chat_id, sticker=sticker_bio)
-
-# --- ADMIN Y STATS ---
-async def autorizar(update: Update, context):
-    if not user_manager.is_admin(update.effective_user.username): return
-    if not context.args: return
-    nuevo = context.args[0]
-    if 'whitelist' not in user_manager.config: user_manager.config['whitelist'] = []
-    user_manager.config['whitelist'].append(nuevo)
-    user_manager._save()
-    await update.message.reply_text(f"✅ {nuevo} autorizado.")
-
-async def stats(update: Update, context):
-    if not user_manager.is_admin(update.effective_user.username): return
-    down_dir = Path("downloads")
-    total_size = sum(f.stat().st_size for f in down_dir.glob('**/*') if f.is_file()) / (1024 * 1024)
-    await update.message.reply_text(f"📊 Temporal: {total_size:.2f} MB")
+        await context.bot.send_sticker(query.message.chat_id, sticker=prepare_sticker(img))
 
 async def menu_handler(update: Update, context):
     query = update.callback_query
     await query.answer()
     if query.data == "menu_books": await query.message.reply_text("📚 Usa /book [titulo]")
-    elif query.data == "menu_media": await query.message.reply_text("🎵 Envía nombre o link de YouTube")
+    elif query.data == "menu_media": await query.message.reply_text("🎵 Envía nombre o link")
 
-# --- FUNCIÓN PRINCIPAL ---
+async def autorizar(update: Update, context):
+    if not user_manager.is_admin(update.effective_user.username): return
+    if context.args:
+        nuevo = context.args[0]
+        user_manager.config.setdefault('whitelist', []).append(nuevo)
+        user_manager._save()
+        await update.message.reply_text(f"✅ {nuevo} autorizado.")
+
+async def stats(update: Update, context):
+    if not user_manager.is_admin(update.effective_user.username): return
+    total_size = sum(f.stat().st_size for f in Path("downloads").glob('**/*') if f.is_file()) / (1024 * 1024)
+    await update.message.reply_text(f"📊 Temporal: {total_size:.2f} MB")
+
+async def error_handler(update, context):
+    print(f"❌ Error: {context.error}")
+
+# --- MAIN ---
+# --- MAIN ACTUALIZADO ---
 def main():
     clean_downloads()
-    token = user_manager.get_token()
-    app = Application.builder().token(token).read_timeout(30).write_timeout(30).build()
+    app = Application.builder().token(user_manager.get_token()).build()
     
-    # Handlers de Comandos
+    # 1. Comandos
     app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("unir", unir_command))
+    app.add_handler(CommandHandler("listo", do_merge))
     app.add_handler(CommandHandler("book", search_books))
     app.add_handler(CommandHandler("stats", stats))
-    app.add_handler(CommandHandler("autorizar", autorizar))    
-    app.add_handler(CommandHandler("mp3", lambda u, c: handle_youtube_search(u, c, format_type="mp3")))
-    app.add_handler(CommandHandler("video", lambda u, c: handle_youtube_search(u, c, format_type="video")))
+    app.add_handler(CommandHandler("autorizar", autorizar))
+
+    # 2. Callbacks (ORDEN CORREGIDO: De lo más específico a lo más general)
     
+    # Botones directos del menú PDF
+    app.add_handler(CallbackQueryHandler(prepare_fill_pdf, pattern="^option_fill$"))
+    app.add_handler(CallbackQueryHandler(convert_pdf_to_word, pattern="^pdf_to_word$"))
+    app.add_handler(CallbackQueryHandler(convert_pdf_to_word, pattern="^start_conversion$"))
     
-    # Handlers de Archivos e Imágenes
-    app.add_handler(MessageHandler(filters.Document.PDF, handle_pdf_upload))
-    app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
-    app.add_error_handler(error_handler)
+    # Menús generales
+    app.add_handler(CallbackQueryHandler(menu_pdf, pattern="^menu_pdf$"))
+    app.add_handler(CallbackQueryHandler(start_merging, pattern="^start_merging$"))
+    app.add_handler(CallbackQueryHandler(do_merge, pattern="^do_merge$"))
     
-    # Handlers de Callbacks (Botones)
+    # Handlers por módulos (Regex)
+    # MUY IMPORTANTE: Estos deben ir AL FINAL porque atrapan cualquier cosa que empiece por pdf_ o bk_
     app.add_handler(CallbackQueryHandler(pdf_callback_handler, pattern=r'^pdf_'))
     app.add_handler(CallbackQueryHandler(image_callback_handler, pattern=r'^img_'))
     app.add_handler(CallbackQueryHandler(book_callback_handler, pattern=r'^bk_'))
     app.add_handler(CallbackQueryHandler(media_callback_handler, pattern=r'^(yt_|music_)'))
     app.add_handler(CallbackQueryHandler(menu_handler, pattern=r'^menu_'))
     
-    # Mensajes de texto (Último por prioridad)
+    # 3. Mensajes
+    app.add_handler(MessageHandler(filters.Document.PDF, handle_pdf_upload))
+    app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, global_text_handler))
     
+    app.add_error_handler(error_handler)
     print("🚀 Bot iniciado correctamente.")
     app.run_polling()
 
 if __name__ == '__main__':
-    while True:
-        try:
-            main()
-        except Exception as e:
-            print(f"🔄 El bot se cayó por un error crítico: {e}. Reiniciando en 5 segundos...")
-            time.sleep(5)
+    main()
