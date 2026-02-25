@@ -225,20 +225,38 @@ async def handle_photo(update: Update, context):
     keyboard = [[InlineKeyboardButton("🖼 PNG", callback_data="img_png"), InlineKeyboardButton("✨ Sticker", callback_data="img_sticker")]]
     await msg.edit_text("✅ Listo:", reply_markup=InlineKeyboardMarkup(keyboard))
 
-async def global_text_handler(update: Update, context):
-    if not is_authorized(update) or not update.message.text: return
-    text = update.message.text
+async def global_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.message or not is_authorized(update): return
+    
+    # Si estamos rellenando un PDF, procesamos el texto
     if 'pdf_step' in context.user_data:
+        text = update.message.text
         context.user_data['pdf_answers'].append(text)
         steps = len(context.user_data['pdf_answers'])
         fields = context.user_data['pdf_fields']
+        
         if steps < len(fields):
             await update.message.reply_text(f"📝 <b>{fields[steps].get('label', f'Campo {steps+1}')}:</b>", parse_mode='HTML')
         else:
             await update.message.reply_text("✅ Datos listos.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🚀 Generar", callback_data="pdf_final")]]))
         return
-    if not text.startswith('/'): await handle_youtube_search(update, context)
 
+    # IMPORTANTE: Aquí ya NO llamamos a handle_youtube_search. 
+    # Ahora solo se activará con el comando /video.
+
+async def video_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_authorized(update): return
+    
+    if not context.args:
+        return await update.message.reply_text("❌ Uso: <code>/video nombre o enlace</code>", parse_mode='HTML')
+    
+    query = " ".join(context.args)
+    
+    # Ahora enviamos el texto directamente como 'query_override'
+    from modules.media import handle_youtube_search
+    await handle_youtube_search(update, context, query_override=query)
+    
+     
 async def pdf_callback_handler(update: Update, context):
     query = update.callback_query
     await query.answer()
@@ -289,6 +307,7 @@ def main():
     app.add_handler(CommandHandler("book", search_books))
     app.add_handler(CommandHandler("stats", stats))
     app.add_handler(CommandHandler("autorizar", autorizar))
+    app.add_handler(CommandHandler("video", video_command))
 
     # 2. Callbacks (ORDEN CORREGIDO: De lo más específico a lo más general)
     

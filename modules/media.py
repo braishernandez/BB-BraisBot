@@ -6,6 +6,7 @@ import glob
 import asyncio
 from pathlib import Path
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram.ext import ContextTypes
 
 def get_user_identifier(update):
     user = update.effective_user
@@ -129,29 +130,40 @@ async def download_media(url, mode="video"):
         print(f"🔥 Error: {e}")
         return None
 
-async def handle_youtube_search(update: Update, context, format_type=None, offset=0):
+async def handle_youtube_search(update: Update, context: ContextTypes.DEFAULT_TYPE, format_type=None, offset=0, query_override=None):
     try:
-        from bot_main import user_manager
+        from bot_main import user_manager, get_user_identifier
     except ImportError:
         user_manager = None
 
     is_callback = update.callback_query is not None
-    if is_callback:
+    
+    # 1. Determinamos qué estamos buscando
+    if query_override:
+        search_query = query_override
+    elif is_callback:
         query_text = update.callback_query.message.text
         search_query = query_text.replace('🔍 Resultados para: ', '').split('\n')[0].strip()
     else:
+        # Limpiamos el comando /video o /mp3 del texto si existe
         text = update.message.text
         search_query = re.sub(r'^/(mp3|video)\s*', '', text).strip()
 
-    if not search_query: return
+    if not search_query: 
+        return
 
-    is_url = search_query.startswith('http')
+    is_url = search_query.startswith(('http://', 'https://'))
 
-    if not is_callback and (format_type or update.message.text.startswith('/')) and is_url:
-        tipo = "audio" if (format_type == "mp3" or update.message.text.startswith('/mp3')) else "video"
+    # 2. CASO: DESCARGA DIRECTA (Si el usuario envió un link)
+    if not is_callback and is_url:
+        # Determinamos si quiere audio o video basándonos en el comando usado o el parámetro
+        cmd = update.message.text.split()[0].lower() if update.message.text else ""
+        tipo = "audio" if (format_type == "mp3" or "/mp3" in cmd) else "video"
+        
         u_name = get_user_identifier(update)
         chat = update.effective_chat
         label = "PRIVADO" if chat.type == "private" else f"GRUPO:{chat.title[:15]}"
+        
         if user_manager:
             user_manager.log(u_name, f"DIRECT_{tipo.upper()}", search_query, origen=label)
 
@@ -165,45 +177,60 @@ async def handle_youtube_search(update: Update, context, format_type=None, offse
             os.remove(path)
             await wait_msg.delete()
         else:
-            await wait_msg.edit_text("❌ Error al descargar. Es posible que el video no esté disponible.")
+            await wait_msg.edit_text("❌ Error al descargar. El enlace podría estar roto o no ser soportado.")
         return
 
+    # 3. CASO: BÚSQUEDA (Si el usuario envió texto)
     wait_msg = None
     if not is_callback:
         wait_msg = await update.message.reply_text(f"🔍 Buscando <b>{search_query}</b>...", parse_mode='HTML')
 
     try:
+        import yt_dlp
         limit = 5
         search_limit = offset + limit + 1
-        loop = asyncio.get_event_loop()
-        with yt_dlp.YoutubeDL({'quiet': True, 'extract_flat': True}) as ydl:
-            search_trigger = f"ytsearch{search_limit}:{search_query}" if not is_url else search_query
-            search_result = await loop.run_in_executor(None, lambda: ydl.extract_info(search_trigger, download=False))
-            all_entries = search_result.get('entries', [search_result])
         
-        entries = all_entries[offset:offset + limit]
-        if not entries or not entries[0]:
+        ydl_opts = {'quiet': True, 'extract_flat': True, 'force_generic_extractor': False}
+        
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            # Si es búsqueda, añadimos el prefijo de YouTube
+            search_trigger = f"ytsearch{search_limit}:{search_query}"
+            loop = asyncio.get_event_loop()
+            search_result = await loop.run_in_executor(None, lambda: ydl.extract_info(search_trigger, download=False))
+            
+            all_entries = search_result.get('entries', [])
+            entries = all_entries[offset:offset + limit]
+
+        if not entries:
             if is_callback: await update.callback_query.answer("❌ Sin resultados.")
-            else: await wait_msg.edit_text("❌ Sin resultados.")
+            elif wait_msg: await wait_msg.edit_text("❌ Sin resultados.")
             return
 
+        # Construcción del teclado
         keyboard = []
         for entry in entries:
             if not entry: continue
             v_id = entry.get('id')
-            title = (entry.get('title')[:45] + "..") if entry.get('title') else "Video"
-            keyboard.append([InlineKeyboardButton(f"📺 {title}", callback_data="ignore")])
+            v_title = entry.get('title', 'Video')
+            title_clean = (v_title[:45] + "..") if len(v_title) > 45 else v_title
+            
+            keyboard.append([InlineKeyboardButton(f"📺 {title_clean}", callback_data="ignore")])
             keyboard.append([
                 InlineKeyboardButton("🎵 MP3", callback_data=f"yt_audio_{v_id}"),
                 InlineKeyboardButton("🎥 Video", callback_data=f"yt_video_{v_id}")
             ])
 
+        # Botones de navegación
         nav_buttons = []
-        if offset > 0: nav_buttons.append(InlineKeyboardButton("⬅️ Anterior", callback_data=f"yt_page_{offset-limit}"))
-        if len(all_entries) > offset + limit: nav_buttons.append(InlineKeyboardButton("Siguiente ➡️", callback_data=f"yt_page_{offset+limit}"))
-        if nav_buttons: keyboard.append(nav_buttons)
+        if offset > 0: 
+            nav_buttons.append(InlineKeyboardButton("⬅️ Ant.", callback_data=f"yt_page_{offset-limit}"))
+        if len(all_entries) > offset + limit: 
+            nav_buttons.append(InlineKeyboardButton("Sig. ➡️", callback_data=f"yt_page_{offset+limit}"))
+        if nav_buttons: 
+            keyboard.append(nav_buttons)
 
         text_display = f"🔍 Resultados para: <b>{search_query}</b>"
+        
         if is_callback: 
             await update.callback_query.edit_message_text(text_display, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='HTML')
         else:
@@ -212,8 +239,9 @@ async def handle_youtube_search(update: Update, context, format_type=None, offse
 
     except Exception as e:
         print(f"Error búsqueda: {e}")
-        if wait_msg: await wait_msg.edit_text("❌ Error en la búsqueda.")
-
+        if is_callback: await update.callback_query.answer("❌ Error en la búsqueda.")
+        elif wait_msg: await wait_msg.edit_text("❌ Hubo un error al buscar en YouTube.")
+        
 async def media_callback_handler(update: Update, context):
     try: from bot_main import user_manager 
     except: user_manager = None
