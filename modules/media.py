@@ -4,23 +4,19 @@ import os
 import re
 import glob
 import asyncio
+import io
 from pathlib import Path
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import ContextTypes
 
-def get_user_identifier(update):
+def get_user_identifier(update: Update):
     user = update.effective_user
     if not user: return "Unknown"
     return user.username if user.username else f"ID:{user.id}"
 
 def get_ydl_opts(mode="video"):
-    import os
-    from pathlib import Path
     Path("downloads").mkdir(exist_ok=True)
-    
-    # IMPORTANTE: Usamos 'node' (el nombre corto) para evitar problemas de rutas con espacios
     node_exe = 'node' 
-
     cookie_path = r"C:\BOT\www.youtube.com_cookies.txt"
 
     opts = {
@@ -28,21 +24,14 @@ def get_ydl_opts(mode="video"):
         'restrictfilenames': True,
         'quiet': False,
         'no_warnings': False,
-        
-        # 1. MOTOR JS (Aseguramos el comando corto)
         'js_runtime': node_exe,
-        
-        # 2. CLIENTE ANDROID: Es el que mejor funciona cuando el n-challenge falla en PC
         'extractor_args': {
             'youtube': {
                 'player_client': ['android', 'web'],
                 'skip': ['po_token']
             }
         },
-        
-        # 3. COOKIES
         'cookiefile': cookie_path,
-
         'headers': {
             'User-Agent': 'com.google.android.youtube/19.05.36 (Linux; U; Android 14; es_ES; Pixel 7 Build/UQ1A.240205.002) gzip',
         }
@@ -56,17 +45,13 @@ def get_ydl_opts(mode="video"):
             'preferredquality': '192',
         }]
     else:
-        # Formato 18 es el que bajó bien en tu consola
         opts['format'] = '18/best'
     
     return opts
 
 async def download_media(url, mode="video"):
-    from pathlib import Path
     Path("downloads").mkdir(exist_ok=True)
-    
     cookie_path = r"C:\BOT\www.youtube.com_cookies.txt"
-    # Usamos un nombre fijo temporal para facilitar la compresión si es necesaria
     temp_output = os.path.join("downloads", "temp_video.%(ext)s")
     
     command = [
@@ -87,21 +72,16 @@ async def download_media(url, mode="video"):
         process = await asyncio.create_subprocess_exec(*command, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
         await process.communicate()
 
-        # Localizar el archivo descargado
         files = glob.glob(os.path.join("downloads", "temp_video.*"))
         if not files: return None
         file_path = files[0]
 
-        # --- LÓGICA DE COMPRESIÓN SI ES VIDEO ---
         if mode == "video":
             file_size_mb = os.path.getsize(file_path) / (1024 * 1024)
-            
             if file_size_mb > 50:
                 print(f"⚠️ Archivo de {file_size_mb:.1f}MB demasiado grande. Comprimiendo...")
                 compressed_path = os.path.join("downloads", "video_comprimido.mp4")
                 
-                # Comando FFmpeg para comprimir (reducimos bitrate a 1MB/s aprox)
-                # Ajustamos la escala a 480p máximo para asegurar que baje el peso
                 compress_command = [
                     "ffmpeg", "-y", "-i", file_path,
                     "-vcodec", "libx264", "-crf", "28", 
@@ -113,50 +93,41 @@ async def download_media(url, mode="video"):
                 comp_process = await asyncio.create_subprocess_exec(*compress_command, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
                 await comp_process.communicate()
                 
-                # Reemplazamos el original por el comprimido si tuvo éxito
                 if os.path.exists(compressed_path):
                     os.remove(file_path)
                     file_path = compressed_path
                     new_size = os.path.getsize(file_path) / (1024 * 1024)
                     print(f"✅ Compresión finalizada: {new_size:.1f}MB")
-                    
-                    if new_size > 50:
-                        print("❌ Sigue siendo demasiado grande tras comprimir.")
-                        # Aquí el bot lanzará el error de "Entity Too Large" o puedes manejarlo tú
 
         return file_path
 
     except Exception as e:
-        print(f"🔥 Error: {e}")
+        print(f"🔥 Error en download_media: {e}")
         return None
 
 async def handle_youtube_search(update: Update, context: ContextTypes.DEFAULT_TYPE, format_type=None, offset=0, query_override=None):
     try:
-        from bot_main import user_manager, get_user_identifier
+        from bot_main import user_manager
     except ImportError:
         user_manager = None
 
     is_callback = update.callback_query is not None
     
-    # 1. Determinamos qué estamos buscando
     if query_override:
         search_query = query_override
     elif is_callback:
         query_text = update.callback_query.message.text
         search_query = query_text.replace('🔍 Resultados para: ', '').split('\n')[0].strip()
     else:
-        # Limpiamos el comando /video o /mp3 del texto si existe
         text = update.message.text
         search_query = re.sub(r'^/(mp3|video)\s*', '', text).strip()
 
-    if not search_query: 
-        return
+    if not search_query: return
 
     is_url = search_query.startswith(('http://', 'https://'))
 
-    # 2. CASO: DESCARGA DIRECTA (Si el usuario envió un link)
+    # 2. CASO: DESCARGA DIRECTA
     if not is_callback and is_url:
-        # Determinamos si quiere audio o video basándonos en el comando usado o el parámetro
         cmd = update.message.text.split()[0].lower() if update.message.text else ""
         tipo = "audio" if (format_type == "mp3" or "/mp3" in cmd) else "video"
         
@@ -172,32 +143,34 @@ async def handle_youtube_search(update: Update, context: ContextTypes.DEFAULT_TY
         
         if path and os.path.exists(path):
             with open(path, 'rb') as f:
-                if tipo == "audio": await update.message.reply_audio(audio=f)
-                else: await update.message.reply_video(video=f)
+                if tipo == "audio": 
+                    await update.effective_chat.send_audio(audio=f)
+                else: 
+                    await update.effective_chat.send_video(video=f)
+            
             os.remove(path)
-            await wait_msg.delete()
+            try:
+                await wait_msg.delete()
+            except:
+                pass
         else:
-            await wait_msg.edit_text("❌ Error al descargar. El enlace podría estar roto o no ser soportado.")
+            await wait_msg.edit_text("❌ Error al descargar.")
         return
 
-    # 3. CASO: BÚSQUEDA (Si el usuario envió texto)
+    # 3. CASO: BÚSQUEDA
     wait_msg = None
     if not is_callback:
         wait_msg = await update.message.reply_text(f"🔍 Buscando <b>{search_query}</b>...", parse_mode='HTML')
 
     try:
-        import yt_dlp
         limit = 5
         search_limit = offset + limit + 1
-        
         ydl_opts = {'quiet': True, 'extract_flat': True, 'force_generic_extractor': False}
         
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            # Si es búsqueda, añadimos el prefijo de YouTube
             search_trigger = f"ytsearch{search_limit}:{search_query}"
             loop = asyncio.get_event_loop()
             search_result = await loop.run_in_executor(None, lambda: ydl.extract_info(search_trigger, download=False))
-            
             all_entries = search_result.get('entries', [])
             entries = all_entries[offset:offset + limit]
 
@@ -206,7 +179,6 @@ async def handle_youtube_search(update: Update, context: ContextTypes.DEFAULT_TY
             elif wait_msg: await wait_msg.edit_text("❌ Sin resultados.")
             return
 
-        # Construcción del teclado
         keyboard = []
         for entry in entries:
             if not entry: continue
@@ -220,14 +192,12 @@ async def handle_youtube_search(update: Update, context: ContextTypes.DEFAULT_TY
                 InlineKeyboardButton("🎥 Video", callback_data=f"yt_video_{v_id}")
             ])
 
-        # Botones de navegación
         nav_buttons = []
         if offset > 0: 
             nav_buttons.append(InlineKeyboardButton("⬅️ Ant.", callback_data=f"yt_page_{offset-limit}"))
         if len(all_entries) > offset + limit: 
             nav_buttons.append(InlineKeyboardButton("Sig. ➡️", callback_data=f"yt_page_{offset+limit}"))
-        if nav_buttons: 
-            keyboard.append(nav_buttons)
+        if nav_buttons: keyboard.append(nav_buttons)
 
         text_display = f"🔍 Resultados para: <b>{search_query}</b>"
         
@@ -239,12 +209,13 @@ async def handle_youtube_search(update: Update, context: ContextTypes.DEFAULT_TY
 
     except Exception as e:
         print(f"Error búsqueda: {e}")
-        if is_callback: await update.callback_query.answer("❌ Error en la búsqueda.")
-        elif wait_msg: await wait_msg.edit_text("❌ Hubo un error al buscar en YouTube.")
-        
-async def media_callback_handler(update: Update, context):
-    try: from bot_main import user_manager 
-    except: user_manager = None
+        if wait_msg: await wait_msg.edit_text("❌ Error en la búsqueda.")
+
+async def media_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try: 
+        from bot_main import user_manager 
+    except: 
+        user_manager = None
 
     query = update.callback_query
     data = query.data
@@ -256,23 +227,38 @@ async def media_callback_handler(update: Update, context):
 
     await query.answer()
     try:
-        _, mode, video_id = data.split("_", 2)
+        parts = data.split("_")
+        if len(parts) < 3: return
+        mode = parts[1]
+        video_id = parts[2]
         full_url = f"https://www.youtube.com/watch?v={video_id}"
         
         if user_manager:
             user_manager.log(get_user_identifier(update), f"BOTON_{mode.upper()}", video_id)
 
+        # Usamos edit_message_text para informar al usuario
         await query.edit_message_text(f"⏳ Procesando <b>{mode.upper()}</b>...", parse_mode='HTML')
+        
         path = await download_media(full_url, mode=("audio" if mode == "audio" else "video"))
         
         if path and os.path.exists(path):
             with open(path, 'rb') as f:
-                if mode == "audio": await query.message.reply_audio(audio=f)
-                else: await query.message.reply_video(video=f)
+                if mode == "audio": 
+                    await query.message.reply_audio(audio=f)
+                else: 
+                    await query.message.reply_video(video=f)
+            
             os.remove(path)
-            await query.message.delete()
+            try:
+                await query.message.delete()
+            except:
+                pass
         else:
             await query.message.reply_text("❌ No se pudo descargar el video.")
+            
     except Exception as e:
         print(f"Error en callback: {e}")
-        await query.message.reply_text("❌ Error al procesar la descarga.")
+        try:
+            await query.message.reply_text("❌ Error al procesar la descarga.")
+        except:
+            pass
