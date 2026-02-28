@@ -232,23 +232,39 @@ async def media_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
         mode = parts[1]
         video_id = parts[2]
         full_url = f"https://www.youtube.com/watch?v={video_id}"
+        tipo = "audio" if mode == "audio" else "video"
         
         if user_manager:
             user_manager.log(get_user_identifier(update), f"BOTON_{mode.upper()}", video_id)
 
-        # Usamos edit_message_text para informar al usuario
+        # Informamos al usuario
         await query.edit_message_text(f"⏳ Procesando <b>{mode.upper()}</b>...", parse_mode='HTML')
         
-        path = await download_media(full_url, mode=("audio" if mode == "audio" else "video"))
+        path = await download_media(full_url, mode=tipo)
         
         if path and os.path.exists(path):
-            with open(path, 'rb') as f:
-                if mode == "audio": 
-                    await query.message.reply_audio(audio=f)
-                else: 
-                    await query.message.reply_video(video=f)
+            # --- ENVÍO BLINDADO CON REINTENTOS ---
+            for intento in range(2):
+                try:
+                    with open(path, 'rb') as f:
+                        if tipo == "audio": 
+                            await query.message.reply_audio(audio=f, connect_timeout=60, read_timeout=60)
+                        else: 
+                            await query.message.reply_video(video=f, connect_timeout=60, read_timeout=60)
+                    break # Éxito: salimos del bucle de reintentos
+                except Exception as e:
+                    error_msg = str(e)
+                    if ("Bad gateway" in error_msg or "Service failure" in error_msg) and intento == 0:
+                        print(f"⚠️ Error de red ({error_msg}). Reintentando envío...")
+                        await asyncio.sleep(2)
+                        continue
+                    # Si falla el segundo intento o es otro error, lanzamos la excepción para el bloque exterior
+                    raise e
             
-            os.remove(path)
+            # Limpieza tras éxito o fallos definitivos
+            if os.path.exists(path): os.remove(path)
+            
+            # Borrado seguro del mensaje de "Procesando"
             try:
                 await query.message.delete()
             except:
@@ -257,8 +273,17 @@ async def media_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
             await query.message.reply_text("❌ No se pudo descargar el video.")
             
     except Exception as e:
+        # Aquí capturamos cualquier error definitivo (incluyendo los que raiseamos arriba)
         print(f"Error en callback: {e}")
         try:
-            await query.message.reply_text("❌ Error al procesar la descarga.")
+            # Si el error es de Telegram porque el archivo es demasiado grande (Entity Too Large)
+            if "Request Entity Too Large" in str(e):
+                await query.message.reply_text("❌ El archivo es demasiado grande para Telegram (máx 50MB).")
+            else:
+                await query.message.reply_text("❌ Error al procesar la descarga.")
         except:
             pass
+        finally:
+            # Aseguramos que el archivo temporal se borre incluso si hubo un crash
+            if 'path' in locals() and path and os.path.exists(path):
+                os.remove(path)
