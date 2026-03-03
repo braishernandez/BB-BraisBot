@@ -49,72 +49,85 @@ def get_ydl_opts(mode="video"):
     
     return opts
 
+
 async def download_media(url, mode="video"):
+    """
+    Versión v2.1 - Optimizada para cambios de Meta (Marzo 2026)
+    Incluye resolución de redirecciones y fallback de seguridad.
+    """
     Path("downloads").mkdir(exist_ok=True)
-    cookie_path = r"C:\BOT\www.youtube.com_cookies.txt"
-    temp_output = os.path.join("downloads", "temp_video.%(ext)s")
     
-    command = [
-        "yt-dlp",
-        "--rm-cache-dir",
-        "--js-runtime", "node",
-        "--cookies", cookie_path,
-        "-f", "18/best[ext=mp4]/best",
-        "--output", temp_output,
-        url
-    ]
-
-    if mode == "audio":
-        command.extend(["-x", "--audio-format", "mp3"])
-
+    # Rutas de configuración
+    youtube_cookies = r"C:\BOT\www.youtube.com_cookies.txt"
+    ig_cookies = r"C:\BOT\BB-BraisBot\instagram_cookies.txt"
+    
+    base_name = f"media_{int(asyncio.get_event_loop().time())}"
+    temp_output = os.path.join("downloads", f"{base_name}.%(ext)s")
+    
     try:
-        print(f"--- [EJECUTANDO DESCARGA] ---")
-        process = await asyncio.create_subprocess_exec(*command, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
-        await process.communicate()
+        # --- 1. RESOLUCIÓN DE REDIRECCIONES (Bypass /share/) ---
+        target_url = url.strip()
+        if "facebook.com/share" in target_url:
+            print(f"🔍 Resolviendo redirección de Meta...")
+            # Usamos curl para obtener la URL efectiva final
+            cmd_resolve = ["curl", "-Ls", "-o", "NUL", "-w", "%{url_effective}", target_url]
+            proc = await asyncio.create_subprocess_exec(*cmd_resolve, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+            stdout, _ = await proc.communicate()
+            resolved_url = stdout.decode().strip()
+            if resolved_url:
+                # Limpiamos parámetros de tracking (?mibextid...)
+                target_url = resolved_url.split("?")[0]
+                print(f"🎯 URL Destino: {target_url}")
 
-        files = glob.glob(os.path.join("downloads", "temp_video.*"))
-        if not files: return None
-        file_path = files[0]
+        is_instagram = any(x in target_url for x in ["instagram.com", "ig.me"])
+        is_facebook = "facebook.com" in target_url or "fb.watch" in target_url
+        cookie_path = ig_cookies if (is_instagram or is_facebook) and os.path.exists(ig_cookies) else youtube_cookies
 
-        if mode == "video":
-            file_size_mb = os.path.getsize(file_path) / (1024 * 1024)
-            if file_size_mb > 50:
-                print(f"⚠️ Archivo de {file_size_mb:.1f}MB demasiado grande. Comprimiendo...")
-                compressed_path = os.path.join("downloads", "video_comprimido.mp4")
-                
-                compress_command = [
-                    "ffmpeg", "-y", "-i", file_path,
-                    "-vcodec", "libx264", "-crf", "28", 
-                    "-preset", "faster", "-vf", "scale=-2:480",
-                    "-acodec", "aac", "-b:a", "128k",
-                    compressed_path
-                ]
-                
-                comp_process = await asyncio.create_subprocess_exec(*compress_command, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
-                await comp_process.communicate()
-                
-                if os.path.exists(compressed_path):
-                    os.remove(file_path)
-                    file_path = compressed_path
-                    new_size = os.path.getsize(file_path) / (1024 * 1024)
-                    print(f"✅ Compresión finalizada: {new_size:.1f}MB")
+        # --- 2. INTENTO DE DESCARGA PRINCIPAL ---
+        print(f"--- [INICIANDO DESCARGA: {target_url}] ---")
+        
+        # Eliminamos selectores de formato rígidos para dejar que yt-dlp decida lo mejor
+        args = [
+            "yt-dlp",
+            "--cookies", cookie_path,
+            "--no-check-certificate",
+            "--user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+            "--merge-output-format", "mp4",
+            "--output", temp_output,
+            target_url
+        ]
+        
+        process = await asyncio.create_subprocess_exec(*args, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+        stdout, stderr = await process.communicate()
 
-        return file_path
+        # Verificación de descarga
+        files = glob.glob(os.path.join("downloads", f"{base_name}.*"))
+        
+        # --- 3. FALLBACK PARA INSTAGRAM (IMAGEN) ---
+        if not files and is_instagram:
+            print("📸 Buscando miniatura/imagen original...")
+            img_args = ["yt-dlp", "--cookies", cookie_path, "--skip-download", "--write-thumbnail", "--convert-thumbnails", "jpg", "--output", temp_output, target_url]
+            await (await asyncio.create_subprocess_exec(*img_args)).communicate()
+            files = glob.glob(os.path.join("downloads", f"{base_name}.*"))
+
+        if not files:
+            error_log = stderr.decode()
+            print(f"❌ Error del motor: {error_log[:150]}")
+            return None
+        
+        # Retornar el archivo más pesado (evita errores con archivos temporales)
+        return max(files, key=os.path.getsize)
 
     except Exception as e:
-        print(f"🔥 Error en download_media: {e}")
+        print(f"🔥 Error crítico en el módulo de descarga: {e}")
         return None
-
+        
 async def handle_youtube_search(update: Update, context: ContextTypes.DEFAULT_TYPE, format_type=None, offset=0, query_override=None):
-    try:
-        from bot_main import user_manager
-    except ImportError:
-        user_manager = None
+    try: from bot_main import user_manager
+    except ImportError: user_manager = None
 
     is_callback = update.callback_query is not None
-    
-    if query_override:
-        search_query = query_override
+    if query_override: search_query = query_override
     elif is_callback:
         query_text = update.callback_query.message.text
         search_query = query_text.replace('🔍 Resultados para: ', '').split('\n')[0].strip()
@@ -123,10 +136,9 @@ async def handle_youtube_search(update: Update, context: ContextTypes.DEFAULT_TY
         search_query = re.sub(r'^/(mp3|video)\s*', '', text).strip()
 
     if not search_query: return
-
     is_url = search_query.startswith(('http://', 'https://'))
 
-    # 2. CASO: DESCARGA DIRECTA
+    # --- CASO: DESCARGA DIRECTA ---
     if not is_callback and is_url:
         cmd = update.message.text.split()[0].lower() if update.message.text else ""
         tipo = "audio" if (format_type == "mp3" or "/mp3" in cmd) else "video"
@@ -135,29 +147,28 @@ async def handle_youtube_search(update: Update, context: ContextTypes.DEFAULT_TY
         chat = update.effective_chat
         label = "PRIVADO" if chat.type == "private" else f"GRUPO:{chat.title[:15]}"
         
-        if user_manager:
-            user_manager.log(u_name, f"DIRECT_{tipo.upper()}", search_query, origen=label)
+        if user_manager: user_manager.log(u_name, f"DIRECT_{tipo.upper()}", search_query, origen=label)
 
         wait_msg = await update.message.reply_text(f"🚀 Procesando {tipo}...")
         path = await download_media(search_query, mode=tipo)
         
         if path and os.path.exists(path):
+            ext = path.lower()
             with open(path, 'rb') as f:
-                if tipo == "audio": 
+                if ext.endswith(('.jpg', '.jpeg', '.png', '.webp')):
+                    await update.effective_chat.send_photo(photo=f, caption="📸 Imagen extraída del post.")
+                elif tipo == "audio" or ext.endswith(('.mp3', '.m4a')):
                     await update.effective_chat.send_audio(audio=f)
-                else: 
+                else:
                     await update.effective_chat.send_video(video=f)
-            
             os.remove(path)
-            try:
-                await wait_msg.delete()
-            except:
-                pass
+            try: await wait_msg.delete()
+            except: pass
         else:
             await wait_msg.edit_text("❌ Error al descargar.")
         return
 
-    # 3. CASO: BÚSQUEDA
+    # --- CASO: BÚSQUEDA ---
     wait_msg = None
     if not is_callback:
         wait_msg = await update.message.reply_text(f"🔍 Buscando <b>{search_query}</b>...", parse_mode='HTML')
@@ -165,7 +176,7 @@ async def handle_youtube_search(update: Update, context: ContextTypes.DEFAULT_TY
     try:
         limit = 5
         search_limit = offset + limit + 1
-        ydl_opts = {'quiet': True, 'extract_flat': True, 'force_generic_extractor': False}
+        ydl_opts = {'quiet': True, 'extract_flat': True}
         
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             search_trigger = f"ytsearch{search_limit}:{search_query}"
@@ -185,7 +196,6 @@ async def handle_youtube_search(update: Update, context: ContextTypes.DEFAULT_TY
             v_id = entry.get('id')
             v_title = entry.get('title', 'Video')
             title_clean = (v_title[:45] + "..") if len(v_title) > 45 else v_title
-            
             keyboard.append([InlineKeyboardButton(f"📺 {title_clean}", callback_data="ignore")])
             keyboard.append([
                 InlineKeyboardButton("🎵 MP3", callback_data=f"yt_audio_{v_id}"),
@@ -193,16 +203,12 @@ async def handle_youtube_search(update: Update, context: ContextTypes.DEFAULT_TY
             ])
 
         nav_buttons = []
-        if offset > 0: 
-            nav_buttons.append(InlineKeyboardButton("⬅️ Ant.", callback_data=f"yt_page_{offset-limit}"))
-        if len(all_entries) > offset + limit: 
-            nav_buttons.append(InlineKeyboardButton("Sig. ➡️", callback_data=f"yt_page_{offset+limit}"))
+        if offset > 0: nav_buttons.append(InlineKeyboardButton("⬅️ Ant.", callback_data=f"yt_page_{offset-limit}"))
+        if len(all_entries) > offset + limit: nav_buttons.append(InlineKeyboardButton("Sig. ➡️", callback_data=f"yt_page_{offset+limit}"))
         if nav_buttons: keyboard.append(nav_buttons)
 
         text_display = f"🔍 Resultados para: <b>{search_query}</b>"
-        
-        if is_callback: 
-            await update.callback_query.edit_message_text(text_display, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='HTML')
+        if is_callback: await update.callback_query.edit_message_text(text_display, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='HTML')
         else:
             if wait_msg: await wait_msg.delete()
             await update.message.reply_text(text_display, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='HTML')
@@ -212,10 +218,8 @@ async def handle_youtube_search(update: Update, context: ContextTypes.DEFAULT_TY
         if wait_msg: await wait_msg.edit_text("❌ Error en la búsqueda.")
 
 async def media_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    try: 
-        from bot_main import user_manager 
-    except: 
-        user_manager = None
+    try: from bot_main import user_manager 
+    except: user_manager = None
 
     query = update.callback_query
     data = query.data
@@ -234,56 +238,39 @@ async def media_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
         full_url = f"https://www.youtube.com/watch?v={video_id}"
         tipo = "audio" if mode == "audio" else "video"
         
-        if user_manager:
-            user_manager.log(get_user_identifier(update), f"BOTON_{mode.upper()}", video_id)
+        if user_manager: user_manager.log(get_user_identifier(update), f"BOTON_{mode.upper()}", video_id)
 
-        # Informamos al usuario
         await query.edit_message_text(f"⏳ Procesando <b>{mode.upper()}</b>...", parse_mode='HTML')
-        
         path = await download_media(full_url, mode=tipo)
         
         if path and os.path.exists(path):
-            # --- ENVÍO BLINDADO CON REINTENTOS ---
+            ext = path.lower()
             for intento in range(2):
                 try:
                     with open(path, 'rb') as f:
-                        if tipo == "audio": 
+                        if ext.endswith(('.jpg', '.jpeg', '.png', '.webp')):
+                            await query.message.reply_photo(photo=f, caption="📸 Imagen extraída.")
+                        elif tipo == "audio": 
                             await query.message.reply_audio(audio=f, connect_timeout=60, read_timeout=60)
                         else: 
                             await query.message.reply_video(video=f, connect_timeout=60, read_timeout=60)
-                    break # Éxito: salimos del bucle de reintentos
+                    break 
                 except Exception as e:
-                    error_msg = str(e)
-                    if ("Bad gateway" in error_msg or "Service failure" in error_msg) and intento == 0:
-                        print(f"⚠️ Error de red ({error_msg}). Reintentando envío...")
-                        await asyncio.sleep(2)
-                        continue
-                    # Si falla el segundo intento o es otro error, lanzamos la excepción para el bloque exterior
+                    if ("Bad gateway" in str(e)) and intento == 0:
+                        await asyncio.sleep(2); continue
                     raise e
             
-            # Limpieza tras éxito o fallos definitivos
             if os.path.exists(path): os.remove(path)
-            
-            # Borrado seguro del mensaje de "Procesando"
-            try:
-                await query.message.delete()
-            except:
-                pass
+            try: await query.message.delete()
+            except: pass
         else:
             await query.message.reply_text("❌ No se pudo descargar el video.")
             
     except Exception as e:
-        # Aquí capturamos cualquier error definitivo (incluyendo los que raiseamos arriba)
         print(f"Error en callback: {e}")
         try:
-            # Si el error es de Telegram porque el archivo es demasiado grande (Entity Too Large)
-            if "Request Entity Too Large" in str(e):
-                await query.message.reply_text("❌ El archivo es demasiado grande para Telegram (máx 50MB).")
-            else:
-                await query.message.reply_text("❌ Error al procesar la descarga.")
-        except:
-            pass
+            msg = "❌ El archivo es demasiado grande (máx 50MB)." if "Request Entity Too Large" in str(e) else "❌ Error al procesar."
+            await query.message.reply_text(msg)
+        except: pass
         finally:
-            # Aseguramos que el archivo temporal se borre incluso si hubo un crash
-            if 'path' in locals() and path and os.path.exists(path):
-                os.remove(path)
+            if 'path' in locals() and path and os.path.exists(path): os.remove(path)
