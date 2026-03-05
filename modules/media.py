@@ -51,75 +51,76 @@ def get_ydl_opts(mode="video"):
 
 
 async def download_media(url, mode="video"):
-    """
-    Versión v2.1 - Optimizada para cambios de Meta (Marzo 2026)
-    Incluye resolución de redirecciones y fallback de seguridad.
-    """
     Path("downloads").mkdir(exist_ok=True)
     
-    # Rutas de configuración
     youtube_cookies = r"C:\BOT\www.youtube.com_cookies.txt"
     ig_cookies = r"C:\BOT\BB-BraisBot\instagram_cookies.txt"
-    
     base_name = f"media_{int(asyncio.get_event_loop().time())}"
     temp_output = os.path.join("downloads", f"{base_name}.%(ext)s")
     
     try:
-        # --- 1. RESOLUCIÓN DE REDIRECCIONES (Bypass /share/) ---
+        # 1. RESOLUCIÓN DE REDIRECCIONES
         target_url = url.strip()
         if "facebook.com/share" in target_url:
             print(f"🔍 Resolviendo redirección de Meta...")
-            # Usamos curl para obtener la URL efectiva final
             cmd_resolve = ["curl", "-Ls", "-o", "NUL", "-w", "%{url_effective}", target_url]
             proc = await asyncio.create_subprocess_exec(*cmd_resolve, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
             stdout, _ = await proc.communicate()
-            resolved_url = stdout.decode().strip()
-            if resolved_url:
-                # Limpiamos parámetros de tracking (?mibextid...)
-                target_url = resolved_url.split("?")[0]
-                print(f"🎯 URL Destino: {target_url}")
+            res = stdout.decode().strip()
+            if res: target_url = res.split("?")[0]
+            print(f"🎯 URL Destino: {target_url}")
 
         is_instagram = any(x in target_url for x in ["instagram.com", "ig.me"])
         is_facebook = "facebook.com" in target_url or "fb.watch" in target_url
         cookie_path = ig_cookies if (is_instagram or is_facebook) and os.path.exists(ig_cookies) else youtube_cookies
 
-        # --- 2. INTENTO DE DESCARGA PRINCIPAL ---
+        # 2. INTENTO DE DESCARGA
         print(f"--- [INICIANDO DESCARGA: {target_url}] ---")
         
-        # Eliminamos selectores de formato rígidos para dejar que yt-dlp decida lo mejor
-        args = [
-            "yt-dlp",
-            "--cookies", cookie_path,
-            "--no-check-certificate",
-            "--user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-            "--merge-output-format", "mp4",
-            "--output", temp_output,
-            target_url
-        ]
-        
-        process = await asyncio.create_subprocess_exec(*args, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
-        stdout, stderr = await process.communicate()
+        async def run_dlp(use_cookies=True):
+            args = [
+                "yt-dlp", "--no-check-certificate",
+                "--user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+                "--merge-output-format", "mp4", "--output", temp_output
+            ]
+            if use_cookies and os.path.exists(cookie_path):
+                args.extend(["--cookies", cookie_path])
+            args.append(target_url)
+            
+            p = await asyncio.create_subprocess_exec(*args, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+            out, err = await p.communicate()
+            return out, err
 
-        # Verificación de descarga
+        stdout, stderr = await run_dlp(use_cookies=True)
+        err_msg = stderr.decode()
+
+        # 3. MANEJO DE ERRORES Y RETRY
+        if "Cannot parse data" in err_msg:
+            print("📢 Error de parseo detectado. Reintentando sin cookies (Guest Mode)...")
+            stdout, stderr = await run_dlp(use_cookies=False)
+            err_msg = stderr.decode()
+
         files = glob.glob(os.path.join("downloads", f"{base_name}.*"))
-        
-        # --- 3. FALLBACK PARA INSTAGRAM (IMAGEN) ---
+
+        # FALLBACK PARA INSTAGRAM (IMAGEN)
         if not files and is_instagram:
-            print("📸 Buscando miniatura/imagen original...")
-            img_args = ["yt-dlp", "--cookies", cookie_path, "--skip-download", "--write-thumbnail", "--convert-thumbnails", "jpg", "--output", temp_output, target_url]
+            print("📸 Buscando imagen...")
+            img_args = ["yt-dlp", "--skip-download", "--write-thumbnail", "--convert-thumbnails", "jpg", "--output", temp_output, target_url]
             await (await asyncio.create_subprocess_exec(*img_args)).communicate()
             files = glob.glob(os.path.join("downloads", f"{base_name}.*"))
 
         if not files:
-            error_log = stderr.decode()
-            print(f"❌ Error del motor: {error_log[:150]}")
+            # Aquí es donde el log te dirá la verdad
+            if "Cannot parse data" in err_msg:
+                print("❌ Meta ha bloqueado el extractor. Se requiere actualización de yt-dlp.")
+            else:
+                print(f"❌ Error del motor: {err_msg[:100]}")
             return None
         
-        # Retornar el archivo más pesado (evita errores con archivos temporales)
         return max(files, key=os.path.getsize)
 
     except Exception as e:
-        print(f"🔥 Error crítico en el módulo de descarga: {e}")
+        print(f"🔥 Error crítico: {e}")
         return None
         
 async def handle_youtube_search(update: Update, context: ContextTypes.DEFAULT_TYPE, format_type=None, offset=0, query_override=None):
