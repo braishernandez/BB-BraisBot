@@ -6,6 +6,7 @@ import re
 import asyncio
 import logging
 import time
+import tempfile
 
 from datetime import datetime
 from pathlib import Path
@@ -18,6 +19,7 @@ from modules.updater import get_latest_biblioteca_bot
 from modules.images import remove_background, prepare_sticker
 from modules.pdf_parser import find_fillable_fields
 from modules.pdf_editor import process_pdf_fields
+from modules.audio import transcribir_y_traducir
 
 
 # --- MANTENIMIENTO ---
@@ -294,6 +296,63 @@ async def stats(update: Update, context):
 async def error_handler(update, context):
     print(f"❌ Error: {context.error}")
 
+
+# --- AUDIO / TRANSCRIPCIÓN ---
+async def handle_audio(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Maneja notas de voz y audios — cualquier usuario puede usar esto."""
+    msg = update.message
+    if not msg:
+        return
+
+    # Aceptar tanto voice (nota de voz) como audio (archivo de audio)
+    file_obj = msg.voice or msg.audio
+    if not file_obj:
+        return
+
+    # Límite 20MB
+    if file_obj.file_size and file_obj.file_size > 20 * 1024 * 1024:
+        await msg.reply_text("❌ Audio demasiado grande. Máximo 20MB.")
+        return
+
+    aviso = await msg.reply_text("🎙️ Transcribiendo audio... puede tardar un momento.")
+
+    try:
+        # Descargar audio
+        tg_file = await file_obj.get_file()
+        ext = '.ogg'
+        if msg.audio and msg.audio.file_name:
+            ext = os.path.splitext(msg.audio.file_name)[1] or '.mp3'
+        tmp_path = tempfile.mktemp(suffix=ext)
+        await tg_file.download_to_drive(tmp_path)
+
+        # Transcribir y traducir
+        resultado = transcribir_y_traducir(tmp_path, modelo='small')
+
+        os.unlink(tmp_path)
+
+        idioma_txt = resultado['idioma_nombre'].capitalize()
+        texto_orig = resultado['texto_original']
+        texto_trad = resultado['texto_traducido']
+
+        if texto_trad and texto_trad != texto_orig:
+            respuesta = (
+                f"🎙️ <b>Transcripción</b> ({idioma_txt})\n"
+                f"{texto_orig}\n\n"
+                f"🌐 <b>Traducción al inglés</b>\n"
+                f"{texto_trad}"
+            )
+        else:
+            respuesta = (
+                f"🎙️ <b>Transcripción</b> ({idioma_txt})\n"
+                f"{texto_orig}"
+            )
+
+        await aviso.edit_text(respuesta, parse_mode='HTML')
+
+    except Exception as e:
+        await aviso.edit_text(f"❌ Error procesando el audio: {e}")
+
+
 # --- MAIN ---
 # --- MAIN ACTUALIZADO ---
 def main():
@@ -330,6 +389,8 @@ def main():
     app.add_handler(CallbackQueryHandler(menu_handler, pattern=r'^menu_'))
     
     # 3. Mensajes
+    app.add_handler(MessageHandler(filters.VOICE, handle_audio))
+    app.add_handler(MessageHandler(filters.AUDIO, handle_audio))
     app.add_handler(MessageHandler(filters.Document.PDF, handle_pdf_upload))
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, global_text_handler))
