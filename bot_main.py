@@ -19,7 +19,6 @@ from modules.updater import get_latest_biblioteca_bot
 from modules.images import remove_background, prepare_sticker
 from modules.pdf_parser import find_fillable_fields
 from modules.pdf_editor import process_pdf_fields
-from modules.audio import transcribir_y_traducir
 
 
 # --- MANTENIMIENTO ---
@@ -304,12 +303,10 @@ async def handle_audio(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not msg:
         return
 
-    # Aceptar tanto voice (nota de voz) como audio (archivo de audio)
     file_obj = msg.voice or msg.audio
     if not file_obj:
         return
 
-    # Límite 20MB
     if file_obj.file_size and file_obj.file_size > 20 * 1024 * 1024:
         await msg.reply_text("❌ Audio demasiado grande. Máximo 20MB.")
         return
@@ -317,7 +314,8 @@ async def handle_audio(update: Update, context: ContextTypes.DEFAULT_TYPE):
     aviso = await msg.reply_text("🎙️ Transcribiendo audio... puede tardar un momento.")
 
     try:
-        # Descargar audio
+        from modules.audio import transcribir, traducir
+
         tg_file = await file_obj.get_file()
         ext = '.ogg'
         if msg.audio and msg.audio.file_name:
@@ -325,32 +323,65 @@ async def handle_audio(update: Update, context: ContextTypes.DEFAULT_TYPE):
         tmp_path = tempfile.mktemp(suffix=ext)
         await tg_file.download_to_drive(tmp_path)
 
-        # Transcribir y traducir
-        resultado = transcribir_y_traducir(tmp_path, modelo='small')
-
-        os.unlink(tmp_path)
-
+        resultado = transcribir(tmp_path, modelo='small')
+        idioma = resultado['idioma']
         idioma_txt = resultado['idioma_nombre'].capitalize()
-        texto_orig = resultado['texto_original']
-        texto_trad = resultado['texto_traducido']
+        texto = resultado['texto']
 
-        if texto_trad and texto_trad != texto_orig:
+        # Traducir si no es español/gallego/catalán
+        texto_trad = None
+        if idioma not in ('es', 'gl', 'ca'):
+            texto_trad = traducir(tmp_path, modelo='small')
+
+        try: os.unlink(tmp_path)
+        except: pass
+
+        # Guardar texto en contexto para el botón resumir
+        context.user_data['ultimo_texto'] = texto
+        context.user_data['ultimo_idioma'] = idioma_txt
+
+        if texto_trad and texto_trad.strip() != texto.strip():
             respuesta = (
                 f"🎙️ <b>Transcripción</b> ({idioma_txt})\n"
-                f"{texto_orig}\n\n"
+                f"{texto}\n\n"
                 f"🌐 <b>Traducción al inglés</b>\n"
                 f"{texto_trad}"
             )
+            context.user_data['ultimo_texto_trad'] = texto_trad
         else:
             respuesta = (
                 f"🎙️ <b>Transcripción</b> ({idioma_txt})\n"
-                f"{texto_orig}"
+                f"{texto}"
             )
 
-        await aviso.edit_text(respuesta, parse_mode='HTML')
+        keyboard = [[InlineKeyboardButton("📝 Resumir", callback_data="audio_resumir")]]
+        await aviso.edit_text(respuesta, parse_mode='HTML', reply_markup=InlineKeyboardMarkup(keyboard))
 
     except Exception as e:
         await aviso.edit_text(f"❌ Error procesando el audio: {e}")
+
+async def handle_audio_resumir(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Genera un resumen del último audio transcrito."""
+    query = update.callback_query
+    await query.answer()
+
+    texto = context.user_data.get('ultimo_texto')
+    if not texto:
+        await query.answer("⚠️ No hay texto para resumir.", show_alert=True)
+        return
+
+    await query.edit_message_reply_markup(reply_markup=None)
+
+    try:
+        from modules.audio import resumir_texto
+        resumen = resumir_texto(texto)
+        idioma_txt = context.user_data.get('ultimo_idioma', '')
+
+        msg_actual = query.message.text or query.message.caption or ""
+        nuevo_msg = msg_actual + f"\n\n📝 <b>Resumen</b>\n{resumen}"
+        await query.edit_message_text(nuevo_msg, parse_mode='HTML')
+    except Exception as e:
+        await query.message.reply_text(f"❌ Error al resumir: {e}")
 
 
 # --- MAIN ---
@@ -389,6 +420,7 @@ def main():
     app.add_handler(CallbackQueryHandler(menu_handler, pattern=r'^menu_'))
     
     # 3. Mensajes
+    app.add_handler(CallbackQueryHandler(handle_audio_resumir, pattern='^audio_resumir$'))
     app.add_handler(MessageHandler(filters.VOICE, handle_audio))
     app.add_handler(MessageHandler(filters.AUDIO, handle_audio))
     app.add_handler(MessageHandler(filters.Document.PDF, handle_pdf_upload))
