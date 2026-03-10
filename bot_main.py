@@ -340,6 +340,14 @@ async def handle_audio(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data['ultimo_texto'] = texto
         context.user_data['ultimo_idioma'] = idioma_txt
 
+        # --- LOGGING ---
+        user = update.effective_user
+        username = user.username or user.first_name or str(user.id)
+        dur_min = resultado.get('duracion_seg', 0) / 60
+        t_proc  = resultado.get('tiempo_proceso', 0)
+        detalle = f"Audio {dur_min:.1f} min | Procesado en {t_proc:.1f}s | Idioma: {idioma_txt}"
+        user_manager.log(username, "TRANSCRIPCIÓN", detalle)
+
         if texto_trad and texto_trad.strip() != texto.strip():
             respuesta = (
                 f"🎙️ <b>Transcripción</b> ({idioma_txt})\n"

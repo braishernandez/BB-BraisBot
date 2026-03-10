@@ -2,6 +2,7 @@
 Módulo de transcripción de audios con Whisper (Windows + CUDA)
 """
 import os
+import time
 import tempfile
 import subprocess
 
@@ -36,19 +37,32 @@ def audio_a_wav(entrada, salida_wav):
     if r.returncode != 0:
         raise RuntimeError(f"Error convirtiendo audio: {r.stderr.decode()[-200:]}")
 
+def duracion_audio(audio_path):
+    cmd = ['ffprobe', '-v', 'error', '-show_entries', 'format=duration',
+           '-of', 'default=noprint_wrappers=1:nokey=1', audio_path]
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True)
+        return float(r.stdout.strip())
+    except:
+        return 0.0
+
 def transcribir(audio_path, modelo='small'):
-    """Transcribe el audio y devuelve texto + idioma."""
     tmp_wav = tempfile.mktemp(suffix='.wav')
     try:
+        duracion = duracion_audio(audio_path)
         audio_a_wav(audio_path, tmp_wav)
         model = get_model(modelo)
+        t_inicio = time.time()
         result = model.transcribe(tmp_wav, task='transcribe')
+        t_total = time.time() - t_inicio
         idioma = result.get('language', '?')
         return {
             'texto': result['text'].strip(),
             'idioma': idioma,
             'idioma_nombre': IDIOMAS.get(idioma, idioma),
             'segmentos': result.get('segments', []),
+            'duracion_seg': duracion,
+            'tiempo_proceso': t_total,
         }
     finally:
         if os.path.exists(tmp_wav):
@@ -56,7 +70,6 @@ def transcribir(audio_path, modelo='small'):
             except: pass
 
 def traducir(audio_path, modelo='small'):
-    """Traduce el audio al inglés con Whisper."""
     tmp_wav = tempfile.mktemp(suffix='.wav')
     try:
         audio_a_wav(audio_path, tmp_wav)
@@ -69,24 +82,15 @@ def traducir(audio_path, modelo='small'):
             except: pass
 
 def resumir_texto(texto):
-    """
-    Genera un resumen extractivo simple del texto.
-    Sin LLM externo — selecciona las frases más representativas.
-    """
     import re
     frases = re.split(r'(?<=[.!?])\s+', texto.strip())
     frases = [f.strip() for f in frases if len(f.strip()) > 20]
     if not frases:
         return texto
-
-    # Si es corto, devolver tal cual
     if len(frases) <= 3:
         return texto
-
-    # Tomar primera, última y las más largas del medio como resumen
     n = max(2, len(frases) // 3)
     medio = sorted(frases[1:-1], key=len, reverse=True)[:n]
-    # Reordenar por posición original
     orden = {f: i for i, f in enumerate(frases)}
     seleccion = sorted([frases[0]] + medio + [frases[-1]], key=lambda f: orden.get(f, 0))
     return ' '.join(seleccion)
