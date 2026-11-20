@@ -13,3 +13,7 @@ __pycache__/
 *.pyc
 .vscode/
 .idea/
+# Datos privados que no deben ir al repositorio (es público)
+cache_libros.json
+debug_web.html
+*cookies*.txt

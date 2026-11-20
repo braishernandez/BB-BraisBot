@@ -18,7 +18,8 @@ class UserManager:
 
     def create_default_config(self):
         default_data = {
-            "bot_token": "ESCRIBE_AQUI_TU_TOKEN",
+            # El token NUNCA va en el código (el repositorio es público): ponlo en config.json
+            "bot_token": "",
             "whitelist": ["braish"],
             "admins": ["braish"],
             "zlib_url": "https://z-lib.id",
@@ -59,8 +60,38 @@ class UserManager:
         self.logger.info(msg)
 
     def get_token(self): return self.config.get('bot_token')
-    def is_authorized(self, user): return user in self.config.get('whitelist', [])
-    def is_admin(self, user): return user in self.config.get('admins', [])
+
+    @staticmethod
+    def _claves(user):
+        """Identificadores de un usuario para comparar con las listas: el @usuario en
+        minúsculas (Telegram no distingue mayúsculas) y su ID numérico. Acepta un
+        telegram.User o un texto (usuario o ID)."""
+        if user is None:
+            return set()
+        if isinstance(user, (str, int)):
+            return {str(user).lstrip('@').lower()}
+        claves = set()
+        if getattr(user, 'username', None):
+            claves.add(user.username.lower())
+        if getattr(user, 'id', None):
+            claves.add(str(user.id))
+        return claves
+
+    def _en_lista(self, user, lista):
+        permitidos = {str(x).lstrip('@').lower() for x in self.config.get(lista, [])}
+        return bool(self._claves(user) & permitidos)
+
+    def is_authorized(self, user): return self._en_lista(user, 'whitelist') or self.is_admin(user)
+    def is_admin(self, user): return self._en_lista(user, 'admins')
+
+    def autorizar(self, quien):
+        """Añade un @usuario o un ID a la lista blanca (sin duplicados). Devuelve el texto guardado."""
+        quien = str(quien).strip().lstrip('@')
+        lista = self.config.setdefault('whitelist', [])
+        if quien.lower() not in {str(x).lower() for x in lista}:
+            lista.append(quien)
+            self._save()
+        return quien
     def get_zlib_url(self): return self.config.get('zlib_url', 'https://z-lib.id')
     
     def set_zlib_url(self, url):
